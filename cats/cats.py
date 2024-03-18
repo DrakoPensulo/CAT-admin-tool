@@ -32,6 +32,10 @@ from chia.wallet.transaction_record import TransactionRecord
 from clvm_tools.binutils import assemble
 from clvm_tools.clvmc import compile_clvm_text
 
+from chia.types.condition_opcodes import ConditionOpcode
+from chia.wallet.lineage_proof import LineageProof
+from chia.types.coin_spend import CoinSpend#, make_spend
+
 
 # Loading the client requires the standard chia root directory configuration that all of the chia commands rely on
 @asynccontextmanager
@@ -51,6 +55,7 @@ async def get_context_manager(
 async def get_signed_tx(
     wallet_rpc_port: Optional[int],
     fingerprint: int,
+    wallet_id:int,
     ph: bytes32,
     amt: uint64,
     fee: uint64,
@@ -65,7 +70,7 @@ async def get_signed_tx(
                 "Error getting wallet client. Make sure wallet is running."
             )
         return await wallet_client.create_signed_transaction(
-            [{"puzzle_hash": ph, "amount": amt}], DEFAULT_TX_CONFIG, fee=fee  # TODO: no default tx config
+            [{"puzzle_hash": ph, "amount": amt}], DEFAULT_TX_CONFIG, wallet_id = wallet_id, fee=fee  # TODO: no default tx config
         )
 
 
@@ -123,6 +128,38 @@ def parse_program(program: Union[str, Program], include: Iterable[str] = []) -> 
 
 CONTEXT_SETTINGS = dict(help_option_names=["-h", "--help"])
 
+async def find_CAT_wallet_id_async(
+        tail:str,
+        wallet_rpc_port: Optional[int],
+        fingerprint: int,
+        root_path: Path,
+    ) -> int:
+    tail = parse_program(tail)
+    tail_hash = tail.get_tree_hash()
+    w_id:int = 0 
+    async with get_context_manager(
+        wallet_rpc_port, fingerprint, root_path
+    ) as client_etc:
+        wallet_client, _, _ = client_etc
+        if wallet_client is None:
+            raise ValueError(
+                "Error getting wallet client. Make sure wallet is running."
+            )
+        wallets_info = await wallet_client.get_wallets(
+            6  # get only CAT wallets
+        )
+        for wallet_info in wallets_info:
+            if wallet_info['data'][:64] == str(tail_hash):
+                w_id = int(wallet_info['id'])
+    if w_id == 0:
+        raise ValueError("Failed to get the wallet ID")
+    
+    wallet_client.close()
+    await wallet_client.await_closed()
+
+    return w_id
+
+
 
 @click.command()
 @click.pass_context
@@ -157,7 +194,10 @@ CONTEXT_SETTINGS = dict(help_option_names=["-h", "--help"])
     "--amount",
     required=True,
     type=int,
-    help="The amount to issue in mojos (regular XCH will be used to fund this)",
+    help=(
+        "The amount to issue in mojos (regular XCH will be used to fund this)"
+        "If negative - the amount to melt"
+        ),
 )
 @click.option(
     "-m",
@@ -321,6 +361,166 @@ async def cmd_func(
     root_path: str,
     wallet_rpc_port: Optional[int],
 ) -> None:
+
+    if amount < 0:
+        print("Trying to melt")
+
+        tail = parse_program(tail)
+        tail_hash = tail.get_tree_hash()
+        solution = parse_program(solution)
+        
+        CAT_wallet_id = await find_CAT_wallet_id_async(tail, wallet_rpc_port, fingerprint = fingerprint, root_path = root_path)
+
+        burn_coin_inner_puzzle = Program.to((
+            1,
+            [[ConditionOpcode.CREATE_COIN, 0, -113, tail, solution]]
+        ))
+        burn_coin_inner_puzzle_hash = burn_coin_inner_puzzle.get_tree_hash()
+
+        temporary_burn_coin_puzzle = construct_cat_puzzle(CAT_MOD, tail.get_tree_hash(), burn_coin_inner_puzzle)
+
+        tbc_ph = temporary_burn_coin_puzzle.get_tree_hash()
+
+
+        CAT_amount_to_melt = -amount
+
+        signed_tx = await get_signed_tx(
+            wallet_rpc_port,
+            fingerprint,
+            CAT_wallet_id,
+            burn_coin_inner_puzzle_hash,#cat_ph,
+            uint64(CAT_amount_to_melt),
+            uint64(0),
+            Path(DEFAULT_ROOT_PATH),#Path(root_path),
+        )
+        
+        if signed_tx.spend_bundle is None:
+            raise ValueError("Error creating signed transaction")
+        CAT_coin_to_melt = list(
+            filter(lambda c: c.puzzle_hash == tbc_ph, signed_tx.spend_bundle.additions())
+        )[0]
+        
+        for coin_spend in signed_tx.spend_bundle.coin_spends:
+            if coin_spend.coin.name() == CAT_coin_to_melt.parent_coin_info:
+                
+                parent_CATcoin = coin_spend.coin
+                pz = coin_spend.puzzle_reveal
+                CAT_puzzle = parse_program(bytes(pz).hex())                
+                
+                inner_pz = CAT_puzzle.rest().rest().first().rest().rest().first().rest().rest().first().rest().first().rest()
+                inner_pz_hash = inner_pz.get_tree_hash()
+
+                """
+                test_pz = construct_cat_puzzle(CAT_MOD, tail.get_tree_hash(), inner_pz)
+                print(test_pz.get_tree_hash())
+                print(parent_CATcoin.puzzle_hash == test_pz.get_tree_hash())
+                """
+                parent_CATcoin_innerpuzzlehashb32 = inner_pz_hash
+                
+                
+        spendable_CATtomelt = SpendableCAT(
+            coin = CAT_coin_to_melt,
+            limitations_program_hash = tail_hash, #ZEROS_TOKEN_PUZZLE.get_tree_hash(),
+            inner_puzzle = burn_coin_inner_puzzle,
+            inner_solution = Program.to([]),#EMPTY_PROGRAM,#
+            lineage_proof = LineageProof(
+                parent_CATcoin.parent_coin_info, parent_CATcoin_innerpuzzlehashb32, uint64(parent_CATcoin.amount)
+            ),        
+            extra_delta = -CAT_coin_to_melt.amount,
+            limitations_solution = solution,#Program.to([]),#solution,
+            limitations_program_reveal=tail,
+        )
+        CATtomelt_spend = unsigned_spend_bundle_for_spendable_cats(CAT_MOD, [spendable_CATtomelt])
+
+        inner_address = decode_puzzle_hash(send_to)
+        
+        intercept_coin_inner_puzzle = Program.to((
+            1,
+            [[ConditionOpcode.CREATE_COIN, inner_address, CAT_amount_to_melt]]
+        ))
+
+        intercept_coin_inner_puzzle_hash = intercept_coin_inner_puzzle.get_tree_hash()
+
+        signed_tx_fee = await get_signed_tx(
+            wallet_rpc_port,
+            fingerprint,
+            1, #wallet_id
+            intercept_coin_inner_puzzle_hash,#cat_ph,
+            uint64(0), # amount
+            uint64(fee), # fee
+            Path(DEFAULT_ROOT_PATH),#Path(root_path),
+        )
+
+        if signed_tx.spend_bundle is None:
+            raise ValueError("Error creating signed transaction")
+        XCH_coin_sending_to_my_addr = list(
+            filter(lambda c: c.puzzle_hash == intercept_coin_inner_puzzle_hash, signed_tx_fee.spend_bundle.additions())
+        )[0]
+        
+        list_of_coinspends = [
+                CoinSpend(XCH_coin_sending_to_my_addr, intercept_coin_inner_puzzle, Program.to([])),
+           ]
+        unsigned_spend_bundle = SpendBundle(list_of_coinspends, G2Element())
+
+        #signature: Tuple[str, ...] = []
+        #spend: Tuple[str, ...] = []
+
+        aggregated_signature = G2Element()
+        for sig in signature:
+            aggregated_signature = AugSchemeMPL.aggregate(
+                [aggregated_signature, G2Element.from_bytes(hexstr_to_bytes(sig))]
+            )
+
+        aggregated_spend = SpendBundle([], G2Element())
+        for bundle in spend:
+            aggregated_spend = SpendBundle.aggregate(
+                [aggregated_spend, SpendBundle.from_bytes(hexstr_to_bytes(bundle))]
+            )
+
+        # Aggregate everything together
+        final_bundle = SpendBundle.aggregate(
+            [
+                signed_tx.spend_bundle,
+                CATtomelt_spend,
+                unsigned_spend_bundle,
+                signed_tx_fee.spend_bundle,
+                aggregated_spend,
+                SpendBundle([], aggregated_signature),
+            ]
+        )
+        final_bundle_dump = json.dumps(
+            final_bundle.to_json_dict(), sort_keys=True, indent=4
+            )
+
+        if as_bytes:
+            final_bundle_dump = bytes(final_bundle).hex()
+        else:
+            final_bundle_dump = json.dumps(
+                final_bundle.to_json_dict(), sort_keys=True, indent=4
+            )
+
+        confirmation = push
+
+        if not quiet:
+            confirmation = input(
+                "The transaction has been created, would you like to push it to the network? (Y/N)"
+            ) in ["y", "Y", "yes", "Yes"]
+        if confirmation:
+            response = await push_tx(
+                wallet_rpc_port, fingerprint, final_bundle, Path(root_path)
+            )
+            if "error" in response:
+                print(f"Error pushing transaction: {response['error']}")
+                return
+            print("Successfully pushed the transaction to the network")
+
+        if not confirmation:
+            print(f"Spend Bundle: {final_bundle_dump}")        
+        
+        #print("most likely melted")
+        return
+# ===================== end of melting block
+
     tail = parse_program(tail)
     curried_args = [assemble(arg) for arg in curry]  # type: ignore[no-untyped-call]
     solution = parse_program(solution)
@@ -386,6 +586,7 @@ async def cmd_func(
     signed_tx = await get_signed_tx(
         wallet_rpc_port,
         fingerprint,
+        1, #wallet_id
         cat_ph,
         uint64(amount),
         uint64(fee),
