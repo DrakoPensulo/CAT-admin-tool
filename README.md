@@ -6,7 +6,7 @@ Install
 
 **Ubuntu/MacOSs**
 ```
-git clone https://github.com/Chia-Network/CAT-admin-tool.git
+git clone https://github.com/DrakoPensulo/CAT-admin-tool.git
 cd CAT-admin-tool
 python3 -m venv venv
 . ./venv/bin/activate
@@ -19,7 +19,7 @@ pip install pytest
 
 **Windows Powershell**
 ```
-git clone https://github.com/Chia-Network/CAT-admin-tool.git
+git clone https://github.com/DrakoPensulo/CAT-admin-tool.git
 cd CAT-admin-tool
 py -m venv venv
 ./venv/Scripts/activate
@@ -38,3 +38,6 @@ cdv --help
 ```
 
 Examples can be found in the [CAT Creation Tutorial](https://docs.chia.net/guides/cat-creation-tutorial/#cat-admin-tool)
+
+Note: This fork contains added functionality. Namely, melting of meltable CATS. In order (to try) to melt pass a negaive value in the -a parameter. THE CODE HAS NOT BEEN AUDITED. USE ON YOUR OWN RISK. FOR EDUCATIONAL PURPOSES ONLY. 
+=======
