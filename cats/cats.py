@@ -24,19 +24,21 @@ from chia.wallet.cat_wallet.cat_utils import (
 from chia.wallet.transaction_record import TransactionRecord
 from chia.wallet.util.tx_config import DEFAULT_TX_CONFIG
 from chia.wallet.vc_wallet.cr_cat_drivers import ProofsChecker, construct_cr_layer
-from chia.wallet.wallet_request_types import PushTX
+from chia.wallet.wallet_request_types import PushTX, GetWallets
 from chia.wallet.wallet_rpc_client import WalletRpcClient
 from chia.wallet.wallet_spend_bundle import WalletSpendBundle
 from chia_rs import AugSchemeMPL, G2Element
 from chia_rs.sized_bytes import bytes32
-from chia_rs.sized_ints import uint64
+from chia_rs.sized_ints import uint16, uint64
 from clvm_tools.binutils import assemble
 from clvm_tools.clvmc import compile_clvm_text
 
 from chia.types.condition_opcodes import ConditionOpcode
 from chia.wallet.lineage_proof import LineageProof
-from chia.types.coin_spend import CoinSpend#, make_spend
-
+#from chia.types.coin_spend import CoinSpend#, make_spend
+from chia_rs import CoinSpend#, Program
+from chia.wallet.util.wallet_types import WalletType
+from chia.types.coin_spend import make_spend
 
 # Loading the client requires the standard chia root directory configuration that all of the chia commands rely on
 @asynccontextmanager
@@ -66,6 +68,7 @@ async def get_signed_tx(
             [{"puzzle_hash": ph, "amount": amt}],
             DEFAULT_TX_CONFIG,
             fee=fee,  # TODO: no default tx config
+            wallet_id=wallet_id,
         )
         return signed_tx.signed_tx
 
@@ -122,7 +125,7 @@ CONTEXT_SETTINGS = dict(help_option_names=["-h", "--help"])
 
 async def find_CAT_wallet_id_async(
         tail:str,
-        wallet_rpc_port: Optional[int],
+        wallet_rpc_port: int | None,
         fingerprint: int,
         root_path: Path,
     ) -> int:
@@ -137,12 +140,13 @@ async def find_CAT_wallet_id_async(
             raise ValueError(
                 "Error getting wallet client. Make sure wallet is running."
             )
-        wallets_info = await wallet_client.get_wallets(
-            6  # get only CAT wallets
-        )
+        wallets_info = (await wallet_client.get_wallets(
+            #6  # get only CAT wallets
+            GetWallets(type=uint16(WalletType.CAT))
+        )).wallets
         for wallet_info in wallets_info:
-            if wallet_info['data'][:64] == str(tail_hash):
-                w_id = int(wallet_info['id'])
+            if wallet_info.data[:64] == str(tail_hash):
+                w_id = wallet_info.id
     if w_id == 0:
         raise ValueError("Failed to get the wallet ID")
     
@@ -450,9 +454,10 @@ async def cmd_func(
         )[0]
         
         list_of_coinspends = [
-                CoinSpend(XCH_coin_sending_to_my_addr, intercept_coin_inner_puzzle, Program.to([])),
+                #CoinSpend(XCH_coin_sending_to_my_addr, intercept_coin_inner_puzzle, Program.to([])),
+                make_spend(XCH_coin_sending_to_my_addr, intercept_coin_inner_puzzle, Program.to([])),
            ]
-        unsigned_spend_bundle = SpendBundle(list_of_coinspends, G2Element())
+        unsigned_spend_bundle = WalletSpendBundle(list_of_coinspends, G2Element())
 
         #signature: Tuple[str, ...] = []
         #spend: Tuple[str, ...] = []
@@ -463,21 +468,21 @@ async def cmd_func(
                 [aggregated_signature, G2Element.from_bytes(hexstr_to_bytes(sig))]
             )
 
-        aggregated_spend = SpendBundle([], G2Element())
+        aggregated_spend = WalletSpendBundle([], G2Element())
         for bundle in spend:
-            aggregated_spend = SpendBundle.aggregate(
-                [aggregated_spend, SpendBundle.from_bytes(hexstr_to_bytes(bundle))]
+            aggregated_spend = WalletSpendBundle.aggregate(
+                [aggregated_spend, WalletSpendBundle.from_bytes(hexstr_to_bytes(bundle))]
             )
 
         # Aggregate everything together
-        final_bundle = SpendBundle.aggregate(
+        final_bundle = WalletSpendBundle.aggregate(
             [
                 signed_tx.spend_bundle,
                 CATtomelt_spend,
                 unsigned_spend_bundle,
                 signed_tx_fee.spend_bundle,
                 aggregated_spend,
-                SpendBundle([], aggregated_signature),
+                WalletSpendBundle([], aggregated_signature),
             ]
         )
         final_bundle_dump = json.dumps(
@@ -498,11 +503,10 @@ async def cmd_func(
                 "The transaction has been created, would you like to push it to the network? (Y/N)"
             ) in ["y", "Y", "yes", "Yes"]
         if confirmation:
-            response = await push_tx(
-                wallet_rpc_port, fingerprint, final_bundle, Path(root_path)
-            )
-            if "error" in response:
-                print(f"Error pushing transaction: {response['error']}")
+            try:
+                await push_tx(wallet_rpc_port, fingerprint, final_bundle, Path(root_path))
+            except Exception as e:
+                print(f"Error pushing transaction: {e}")
                 return
             print("Successfully pushed the transaction to the network")
 
