@@ -1,43 +1,48 @@
 #!/usr/bin/env python
 
-from setuptools import setup, find_packages
+from __future__ import annotations
 
-with open("README.md", "rt") as fh:
+from setuptools import find_packages, setup
+
+with open("README.md") as fh:
     long_description = fh.read()
 
 dependencies = [
-    "chia-blockchain==2.1.4",
+    "chia-blockchain==2.5.7",
 ]
 
 dev_dependencies = [
-    "black==23.7.0",
     "pytest",
-    "pytest-asyncio",
+    "pytest-asyncio>=0.26.0",
     "pytest-env",
+    "pre-commit==4.4.0; python_version >= '3.10'",
+    "mypy==1.18.2",
+    "types-setuptools",
+    "ruff==0.14.5",
 ]
 
 setup(
     name="CAT_admin_tool",
-    version="0.0.1",
     author="Quexington",
     packages=find_packages(exclude=("tests",)),
     entry_points={
         "console_scripts": [
             "cats = cats.cats:main",
             "secure_the_bag = cats.secure_the_bag:main",
-            "unwind_the_bag = cats.unwind_the_bag:main"
+            "unwind_the_bag = cats.unwind_the_bag:main",
         ],
     },
     author_email="m.hauff@chia.net",
     setup_requires=["setuptools_scm"],
     install_requires=dependencies,
     url="https://github.com/Chia-Network",
-    license="https://opensource.org/licenses/Apache-2.0",
+    license="Apache-2.0",
     description="Tools to administer issuance and redemption of a Chia Asset Token or CAT",
     classifiers=[
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.6",
-        "Programming Language :: Python :: 3.7",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
         "License :: OSI Approved :: Apache Software License",
         "Topic :: Security :: Cryptography",
     ],
