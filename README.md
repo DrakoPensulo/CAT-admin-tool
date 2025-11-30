@@ -14,6 +14,7 @@ python -m pip install --upgrade pip setuptools wheel
 pip install .
 pip install chia-dev-tools --no-deps
 pip install pytest
+pip install zstd
 ```
 (If you're on an M1 Mac, make sure you are running an ARM64 native python virtual environment)
 
@@ -27,6 +28,7 @@ python -m pip install --upgrade pip setuptools wheel
 pip install .
 pip install chia-dev-tools --no-deps
 pip install pytest
+pip install zstd
 ```
 
 Lastly this requires a synced, running light wallet
